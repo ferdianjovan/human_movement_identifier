@@ -16,9 +16,9 @@ from std_msgs.msg import Header
 
 class KNNClassifier(object):
 
-    def __init__(self, training_ratio, chunk, alpha, beta):
-        self.alpha = alpha
-        self.beta = beta
+    def __init__(self, training_ratio):
+        self.alpha = 0.6
+        self.beta = 0.4
         self.k = 11
         self.accuracy = 0
         self.training_data = []
@@ -28,7 +28,7 @@ class KNNClassifier(object):
         )
 
         trajs = self._retrieve_logs()
-        self._split_and_label_data(trajs, training_ratio, chunk)
+        self._split_and_label_data(trajs, training_ratio, 20)
 
     # get k nearest values to a test data based on positions and velocities
     def _nearest_values_to(self, test):
@@ -80,7 +80,8 @@ class KNNClassifier(object):
                 nearest.append(dist)
                 index.append(i)
 
-        return [self.training_data[i] for i in index]
+        sort_data = sorted(zip(nearest, index), key=lambda i: i[0])
+        return [self.training_data[i[1]] for i in sort_data]
 
     # predict the class of the test data
     def predict_class_data(self, test_data):
@@ -96,7 +97,7 @@ class KNNClassifier(object):
             result = 'non-human'
 
         rospy.loginfo("%s belongs to %s", test_data.uuid, result)
-        return (result, human[:3], nonhuman[:3])
+        return (result, human[:1], nonhuman[:1])
 
     # get accuracy of the overall prediction
     def get_accuracy(self):
@@ -107,7 +108,7 @@ class KNNClassifier(object):
             rospy.loginfo("The actual class is %s", i[1])
             if result[0] == i[1]:
                 counter += 1
-                print float(counter) / float(len(self.test_data))
+                rospy.loginfo(float(counter) / float(len(self.test_data)))
         self.accuracy = float(counter) / float(len(self.test_data))
 
         return self.accuracy
@@ -123,7 +124,13 @@ class KNNClassifier(object):
             label = 'human'
             start = traj.humrobpose[0][0].header.stamp
             end = traj.humrobpose[-1][0].header.stamp
-            if traj.length[-1] < 0.1 or (end - start).secs < 3:
+            delta = float((end-start).secs + 0.000000001 * (end-start).nsecs)
+            if delta != 0.0:
+                avg_vel = traj.length[-1] / delta
+            else:
+                avg_vel = 0.0
+            guard = traj.length[-1] < 0.1 or avg_vel < 0.5 or avg_vel > 1.5
+            if guard:
                 label = 'non-human'
             for i in chunked_traj:
                 if random.random() < training_ratio:
@@ -133,26 +140,26 @@ class KNNClassifier(object):
 
     # normalize poses so that the first pose becomes (0,0)
     # and the second pose becomes the base for the axis
+    # with tangen, cos and sin
     def get_normalized_poses(self, poses):
-        dx = abs(poses[1].pose.position.x - poses[0].pose.position.x)
-        dy = abs(poses[1].pose.position.y - poses[0].pose.position.y)
+        dx = poses[1].pose.position.x - poses[0].pose.position.x
+        dy = poses[1].pose.position.y - poses[0].pose.position.y
         if dx < 0.00001:
             dx = 0.00000000000000000001
         rad = math.atan(dy / dx)
-        rot_matrix = [
-            [math.cos(rad), -math.sin(rad)],
-            [math.sin(rad), math.cos(rad)]
-        ]
         for i, j in enumerate(poses):
-            x = j.pose.position.x * rot_matrix[0][0] + \
-                j.pose.position.y * rot_matrix[1][0]
-            y = j.pose.position.x * rot_matrix[0][1] + \
-                j.pose.position.y * rot_matrix[1][1]
-            poses[i].pose.position.x = x
-            poses[i].pose.position.y = y
-            if i != 0:
-                poses[i].pose.position.x -= poses[0].pose.position.x
-                poses[i].pose.position.y -= poses[0].pose.position.y
+            if i > 0:
+                dx = j.pose.position.x - poses[0].pose.position.x
+                dy = j.pose.position.y - poses[0].pose.position.y
+                if dx < 0.00001:
+                    dx = 0.00000000000000000001
+                rad2 = math.atan(dy / dx)
+                delta_rad = rad2 - rad
+                r = dy / math.sin(rad2)
+                x = r * math.cos(delta_rad)
+                y = r * math.sin(delta_rad)
+                poses[i].pose.position.x = x
+                poses[i].pose.position.y = y
 
         poses[0].pose.position.x = poses[0].pose.position.y = 0
         return poses
@@ -219,27 +226,19 @@ class KNNClassifier(object):
         ax = SubplotZero(fig, 111)
         fig.add_subplot(ax)
         line_style = ['r.-', 'gx-', 'bo-']
-        avg = 0
 
         # plotting test data
         x = [i.pose.position.x for i in test]
         y = [i.pose.position.y for i in test]
         ax.plot(x, y, line_style[0], label="Test")
-        avg += sum([abs(i) for i in x]) / float(len(x))
-        avg += sum([abs(i) for i in y]) / float(len(y))
         # plotting human data
         x = [i.pose.position.x for i in human]
         y = [i.pose.position.y for i in human]
         ax.plot(x, y, line_style[1], label="Human")
-        avg += sum([abs(i) for i in x]) / float(len(x))
-        avg += sum([abs(i) for i in y]) / float(len(y))
         # plotting non-human data
         x = [i.pose.position.x for i in non_human]
         y = [i.pose.position.y for i in non_human]
         ax.plot(x, y, line_style[2], label="Non-human")
-        avg += sum([abs(i) for i in x]) / float(len(x))
-        avg += sum([abs(i) for i in y]) / float(len(y))
-        avg /= 60.0
 
         ax.margins(0.05)
         ax.legend(loc="lower right", fontsize=10)
@@ -260,34 +259,25 @@ class KNNClassifier(object):
 if __name__ == '__main__':
     rospy.init_node("labeled_short_poses")
 
-    if len(sys.argv) < 6:
+    if len(sys.argv) < 3:
         rospy.logerr(
-            "usage: predictor train_ratio chunk alpha beta accuracyOrNot[1/0]"
+            "usage: predictor train_ratio accuracy[1/0]"
         )
         sys.exit(2)
 
-    lsp = KNNClassifier(
-        float(sys.argv[1]), int(sys.argv[2]),
-        float(sys.argv[3]), float(sys.argv[4]))
-    if int(sys.argv[5]):
+    lsp = KNNClassifier(float(sys.argv[1]))
+    if int(sys.argv[2]):
         rospy.loginfo("The overall accuracy is " + str(lsp.get_accuracy()))
     else:
         human_data = None
         while not rospy.is_shutdown():
             human_data = lsp.test_data[random.randint(0, len(lsp.test_data)-1)]
-            # if human_data[1] == 'non-human':
             prediction = lsp.predict_class_data(human_data[0])
+            # if prediction[0] == 'non-human' and human_data[1] == 'non-human':
             rospy.loginfo("The actual class is %s", human_data[1])
-            for i in range(min([len(prediction[1]), len(prediction[2])])):
-                rospy.loginfo("The real data visualisation")
-                lsp.visualize_test_between_class(
-                    human_data[0].real,
-                    prediction[1][i][0].real,
-                    prediction[2][i][0].real
-                )
-                rospy.loginfo("The normalized data visualisation")
+            if len(prediction[1]) != 0 and len(prediction[2]) != 0:
                 lsp.visualize_test_between_class(
                     human_data[0].normal,
-                    prediction[1][i][0].normal,
-                    prediction[2][i][0].normal
+                    prediction[1][0][0].normal,
+                    prediction[2][0][0].normal
                 )
