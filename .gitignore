@@ -1,0 +1,9 @@
+*~
+.history*
+*.user
+*.swp
+*.orig
+*pyc
+*swo
+
+.ropeproject/
