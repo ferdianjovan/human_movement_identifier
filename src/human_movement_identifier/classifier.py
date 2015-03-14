@@ -7,6 +7,7 @@ import math
 import pymongo
 import pylab
 import matplotlib.pyplot as plt
+from multiprocessing import Queue
 from collections import namedtuple
 from mpl_toolkits.axes_grid.axislines import SubplotZero
 from human_trajectory.trajectory import Trajectory
@@ -16,7 +17,7 @@ from std_msgs.msg import Header
 
 class KNNClassifier(object):
 
-    def __init__(self, training_ratio):
+    def __init__(self):
         self.alpha = 0.6
         self.beta = 0.4
         self.k = 11
@@ -27,8 +28,23 @@ class KNNClassifier(object):
             "NormalizePoses", "uuid real normal"
         )
 
+    # update training and test data from database
+    def update_database(self):
+        self.training_data = []
+        self.test_data = []
         trajs = self._retrieve_logs()
-        self._split_and_label_data(trajs, training_ratio, 20)
+        self._label_data(trajs)
+
+    # splitting training data into training and test data
+    def split_training_data(self, training_ratio):
+        temp = []
+        self.test_data = []
+        for i in self.training_data:
+            if random.random() < training_ratio:
+                temp.append(i)
+            else:
+                self.test_data.append(i)
+        self.training_data = temp
 
     # get k nearest values to a test data based on positions and velocities
     def _nearest_values_to(self, test):
@@ -99,27 +115,52 @@ class KNNClassifier(object):
         rospy.loginfo("%s belongs to %s", test_data.uuid, result)
         return (result, human[:1], nonhuman[:1])
 
-    # get accuracy of the overall prediction
-    def get_accuracy(self):
+    # get accuracy of the overall prediction with k-fold-cross validation
+    def get_accuracy(self, queue=None):
         rospy.loginfo("Getting the overall accuracy...")
-        counter = 0
-        for i in self.test_data:
-            result = self.predict_class_data(i[0])
-            rospy.loginfo("The actual class is %s", i[1])
-            if result[0] == i[1]:
-                counter += 1
-                rospy.loginfo(float(counter) / float(len(self.test_data)))
-        self.accuracy = float(counter) / float(len(self.test_data))
+        # dividing training data into k
+        k_fold = 5
+        length = len(self.training_data) / k_fold
+        k_fold_list = []
+        preempt = False
+        for i in range(k_fold):
+            ind = i * length
+            k_fold_list.append(self.training_data[ind:ind+length])
 
+        # measure the accuracy
+        accuracy = 0
+        for j in k_fold_list:
+            rospy.loginfo("Total testing data is %d", len(j))
+            self.training_data = []
+            for i in k_fold_list:
+                if i != j:
+                    self.training_data.extend(i)
+
+            counter = 0
+            for i in j:
+                if queue is not None and not queue.empty():
+                    preempt = queue.get()['preempt']
+                    break
+                result = self.predict_class_data(i[0])
+                rospy.loginfo("The actual class is %s", i[1])
+                if result[0] == i[1]:
+                    counter += 1
+            accuracy += float(counter) / float(len(j))
+            rospy.loginfo("Accuracy for this data is %d", accuracy)
+            if preempt:
+                break
+
+        if not preempt:
+            self.accuracy = accuracy/float(k_fold)
         return self.accuracy
 
-    # split and label data into training and test set
-    def _split_and_label_data(self, trajs, training_ratio, chunk):
+    # label data and put them into training set
+    def _label_data(self, trajs):
         rospy.loginfo("Splitting data...")
         for uuid, traj in trajs.iteritems():
             traj.validate_all_poses()
-            chunked_traj = self._create_chunk(
-                uuid, list(zip(*traj.humrobpose)[0]), chunk
+            chunked_traj = self.create_chunk(
+                uuid, list(zip(*traj.humrobpose)[0])
             )
             label = 'human'
             start = traj.humrobpose[0][0].header.stamp
@@ -133,10 +174,7 @@ class KNNClassifier(object):
             if guard:
                 label = 'non-human'
             for i in chunked_traj:
-                if random.random() < training_ratio:
-                    self.training_data.append((i, label))
-                else:
-                    self.test_data.append((i, label))
+                self.training_data.append((i, label))
 
     # normalize poses so that the first pose becomes (0,0)
     # and the second pose becomes the base for the axis
@@ -155,7 +193,10 @@ class KNNClassifier(object):
                     dx = 0.00000000000000000001
                 rad2 = math.atan(dy / dx)
                 delta_rad = rad2 - rad
-                r = dy / math.sin(rad2)
+                if rad2 == 0:
+                    r = dx / math.cos(rad2)
+                else:
+                    r = dy / math.sin(rad2)
                 x = r * math.cos(delta_rad)
                 y = r * math.sin(delta_rad)
                 poses[i].pose.position.x = x
@@ -165,7 +206,7 @@ class KNNClassifier(object):
         return poses
 
     # chunk data for each trajectory
-    def _create_chunk(self, uuid, poses, chunk):
+    def create_chunk(self, uuid, poses, chunk=20):
         i = 0
         chunk_trajectory = []
         while i < len(poses) - (chunk - 1):
@@ -265,15 +306,17 @@ if __name__ == '__main__':
         )
         sys.exit(2)
 
-    lsp = KNNClassifier(float(sys.argv[1]))
+    lsp = KNNClassifier()
+    lsp.update_database()
+
     if int(sys.argv[2]):
         rospy.loginfo("The overall accuracy is " + str(lsp.get_accuracy()))
     else:
+        lsp.split_training_data(float(sys.argv[1]))
         human_data = None
         while not rospy.is_shutdown():
             human_data = lsp.test_data[random.randint(0, len(lsp.test_data)-1)]
             prediction = lsp.predict_class_data(human_data[0])
-            # if prediction[0] == 'non-human' and human_data[1] == 'non-human':
             rospy.loginfo("The actual class is %s", human_data[1])
             if len(prediction[1]) != 0 and len(prediction[2]) != 0:
                 lsp.visualize_test_between_class(
