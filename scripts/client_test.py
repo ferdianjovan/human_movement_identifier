@@ -6,7 +6,9 @@ from human_movement_identifier.msg import HMCAction, HMCGoal
 
 
 def test():
-    client = actionlib.SimpleActionClient("human_identifier_server", HMCAction)
+    client = actionlib.SimpleActionClient(
+        "human_movement_detection_server", HMCAction
+    )
     rospy.loginfo("waiting for server...")
     client.wait_for_server()
 
@@ -25,6 +27,6 @@ def test():
 
 
 if __name__ == '__main__':
-    rospy.init_node("human_identifier_tester")
+    rospy.init_node("human_movement_detection_tester")
     test()
     rospy.spin()

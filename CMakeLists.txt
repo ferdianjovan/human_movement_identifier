@@ -8,6 +8,7 @@ find_package(catkin REQUIRED COMPONENTS
   std_msgs
   actionlib
   actionlib_msgs
+  message_generation
 )
 
 # find_package(Boost REQUIRED COMPONENTS system)
@@ -17,6 +18,11 @@ catkin_python_setup()
 ###################################
 ## catkin specific configuration ##
 ###################################
+
+add_message_files(
+    DIRECTORY msg
+    FILES HumanIdentifier.msg
+)
 
 add_action_files(
     DIRECTORY action
@@ -31,7 +37,7 @@ generate_messages(
 )
 
 catkin_package(
-  CATKIN_DEPENDS human_trajectory geometry_msgs rospy std_msgs actionlib actionlib_msgs
+  CATKIN_DEPENDS human_trajectory geometry_msgs rospy std_msgs actionlib actionlib_msgs message_runtime
 )
 
 ###########

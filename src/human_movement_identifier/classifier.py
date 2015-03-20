@@ -7,7 +7,6 @@ import math
 import pymongo
 import pylab
 import matplotlib.pyplot as plt
-from multiprocessing import Queue
 from collections import namedtuple
 from mpl_toolkits.axes_grid.axislines import SubplotZero
 from human_trajectory.trajectory import Trajectory
@@ -251,14 +250,31 @@ class KNNClassifier(object):
         for log in client.message_store.people_perception.find():
             for i, uuid in enumerate(log['uuids']):
                 if uuid not in trajs:
-                    t = Trajectory(uuid)
-                else:
-                    t = trajs[uuid]
-                t.append_pose(log['people'][i],
-                              log['header']['stamp']['secs'],
-                              log['header']['stamp']['nsecs'],
-                              log['robot'])
-                trajs.update({uuid: t})
+                    trajs[uuid] = Trajectory(uuid)
+                header = Header(
+                    log['header']['seq'],
+                    rospy.Time(log['header']['stamp']['secs'],
+                               log['header']['stamp']['nsecs']),
+                    log['header']['frame_id']
+                )
+                human_pose = Pose(
+                    Point(log['people'][i]['position']['x'],
+                          log['people'][i]['position']['y'],
+                          log['people'][i]['position']['z']),
+                    Quaternion(log['people'][i]['orientation']['x'],
+                               log['people'][i]['orientation']['y'],
+                               log['people'][i]['orientation']['z'],
+                               log['people'][i]['orientation']['w'])
+                )
+                robot_pose = Pose(
+                    Point(log['robot']['position']['x'],
+                          log['robot']['position']['y'],
+                          log['robot']['position']['z']),
+                    Quaternion(log['robot']['orientation']['x'],
+                               log['robot']['orientation']['y'],
+                               log['robot']['orientation']['z'],
+                               log['robot']['orientation']['w']))
+                trajs[uuid].append_pose(human_pose, header, robot_pose)
         return trajs
 
     # create a visualisation graph in cartesian coordinate

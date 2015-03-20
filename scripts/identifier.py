@@ -3,10 +3,10 @@
 import rospy
 import actionlib
 from multiprocessing import Process, Queue
-from human_trajectory.trajectory import Trajectory as Traj
+from human_trajectory.trajectory import Trajectory
 from human_trajectory.msg import Trajectories
 from human_movement_identifier.classifier import KNNClassifier
-from human_movement_identifier.msg import HMCAction, HMCResult
+from human_movement_identifier.msg import HMCAction, HMCResult, HumanIdentifier
 
 
 class IdentifierServer(object):
@@ -25,13 +25,16 @@ class IdentifierServer(object):
             auto_start=False
         )
         self._as.start()
+        self._pub = rospy.Publisher(
+            self._action_name+'/detections', HumanIdentifier, queue_size=10
+        )
         rospy.loginfo("%s is ready", name)
 
     # get trajectory data
     def traj_callback(self, msg):
         self.trajs = []
         for i in msg.trajectories:
-            traj = Traj(i.uuid)
+            traj = Trajectory(i.uuid)
             traj.humrobpose = zip(i.trajectory, i.robot)
             traj.length.append(i.trajectory_length)
             traj.sequence_id = i.sequence_id
@@ -40,26 +43,37 @@ class IdentifierServer(object):
     def get_online_prediction(self):
         # Subscribe to trajectory publisher
         rospy.loginfo(
-            "%s is subscribing to human_trajectories/trajectories",
+            "%s is subscribing to human_trajectories/trajectories/batch",
             self._action_name
         )
         s = rospy.Subscriber(
-            "human_trajectories/trajectories", Trajectories,
+            "human_trajectories/trajectories/batch", Trajectories,
             self.traj_callback, None, 30
         )
 
         while not self._as.is_preempt_requested():
             trajs = self.trajs
             for i in trajs:
+                human_counter = 0
                 chunked_traj = self.classifier.create_chunk(
                     i.uuid, list(zip(*i.humrobpose)[0])
                 )
                 for j in chunked_traj:
-                    self.classifier.predict_class_data(j)
                     if self._as.is_preempt_requested():
                         break
+                    result = self.classifier.predict_class_data(j)
+                    if result[0] == 'human':
+                        human_counter += 1
                 if self._as.is_preempt_requested():
+                    rospy.loginfo("The online prediction is preempted")
                     break
+                if len(chunked_traj) > 0:
+                    conf = human_counter/float(len(chunked_traj))
+                    human_type = 'human'
+                    if conf < 0.5:
+                        conf = 1.0 - conf
+                        human_type = 'non-human'
+                    self._pub.publish(HumanIdentifier(i.uuid, human_type, conf))
         self._as.set_preempted()
         s.unregister()
 
@@ -78,7 +92,7 @@ class IdentifierServer(object):
         preempt = False
         while t.is_alive():
             if self._as.is_preempt_requested():
-                queue.put({'preempt':True})
+                queue.put({'preempt': True})
                 preempt = True
                 break
             rospy.sleep(0.1)
@@ -104,6 +118,6 @@ class IdentifierServer(object):
 
 
 if __name__ == '__main__':
-    rospy.init_node("human_identifier_server")
+    rospy.init_node("human_movement_detection_server")
     sv = IdentifierServer(rospy.get_name())
     rospy.spin()
